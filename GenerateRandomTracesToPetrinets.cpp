@@ -53,8 +53,8 @@
 // CONFIGURE HERE
 // ============================================================
 static const char* EVENTS_FILE      = "events.txt";           // input: "a b c d"
-static const char* ALL_TRACES_FILE  = "AllPossibleTraces.txt";
-static const char* REPORT_FILE      = "synthesis_report.md";
+static const char* ALL_TRACES_FILE  = "output/AllPossibleTraces.txt";
+static const char* REPORT_FILE      = "output/synthesis_report.md";
 static const int   DEFAULT_KMAX     = 3;
 static const int   DEFAULT_N_TRACES = 4;
 static const int   INITIAL_STATE_OVERRIDE = 0; // <-- adjust if your TS exposes a real initial state
@@ -161,7 +161,7 @@ int main() {
 
             int n = readIntOrDefault("How many random traces to select (n)?", DEFAULT_N_TRACES);
 
-            std::string selectedFile = "SelectedTraces_iter" + std::to_string(iteration) + ".txt";
+            std::string selectedFile = "output/SelectedTraces_iter" + std::to_string(iteration) + ".txt";
             pickRandomTraces(ALL_TRACES_FILE, n, selectedFile);
 
             // ---- build TS (your existing, working class) ----
