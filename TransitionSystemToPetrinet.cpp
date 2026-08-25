@@ -153,21 +153,21 @@ int main() {
                   << "---\n\n";
         }
 
-        int iteration = 0;
-        int x = 5;
-        while (x) {
-            ++iteration;
-            std::cout << "\n--- Iteration " << iteration << " ---\n";
+        // int iteration = 0;
+        // int x = 5;
+        // while (x) {
+        //     ++iteration;
+            //std::cout << "\n--- Iteration " << iteration << " ---\n";
 
-            int n = readIntOrDefault("How many random traces to select (n)?", DEFAULT_N_TRACES);
+            // int n = readIntOrDefault("How many random traces to select (n)?", DEFAULT_N_TRACES);
 
-            std::string selectedFile = "output/SelectedTraces_iter" + std::to_string(iteration) + ".txt";
-            //pickRandomTraces(ALL_TRACES_FILE, n, selectedFile);
+            // std::string selectedFile = "output/SelectedTraces_iter" + std::to_string(iteration) + ".txt";
+            // pickRandomTraces(ALL_TRACES_FILE, n, selectedFile);
 
             // ---- build TS (your existing, working class) ----
+            string selectedFile = "transition_system.txt";
             TransitionSystem ts;
-            ts.loadFromTraceFile(selectedFile);
-
+            ts.loadFromFile(selectedFile);
             std::cout << "States: " << ts.states.size()
                       << ", Event types: " << ts.event_transitions.size() << "\n";
 
@@ -182,21 +182,12 @@ int main() {
                               : " (bisimilar NOT reached by kmax -- mining-only PN)")
                       << ", cover size=" << result.irredundantCover.size() << "\n";
 
-            std::string dotFile = "output/iteration_" + std::to_string(iteration) + ".dot";
-            std::ofstream dotOut(dotFile);
-            if (!dotOut) throw std::runtime_error("could not open " + dotFile);
-            regions::writeDot(dotOut, pn);
-            dotOut.close();
-            std::cout << "  Petri net written to " << dotFile
-                    << " (run: dot -Tpng " << dotFile
-                    << " -o output/iteration_" << iteration << ".png)\n";
-
             // ---- append the report section ----
             std::ofstream out(REPORT_FILE, std::ios::app);
             if (!out) throw std::runtime_error(std::string("could not reopen ") + REPORT_FILE);
 
-            out << "## Iteration " << iteration << " -- " << timestamp() << "\n\n";
-            out << "- Requested random traces (n): " << n << "\n";
+            //out << "## Iteration " << iteration << " -- " << timestamp() << "\n\n";
+            //out << "- Requested random traces (n): " << n << "\n";
             out << "- kmax searched: " << kmax << "\n\n";
 
             writeSelectedTraces(out, selectedFile);
@@ -220,8 +211,8 @@ int main() {
 
             std::cout << "  Report section written to " << REPORT_FILE << "\n";
 
-            x = readIntOrDefault("\nRun another iteration? (1 = yes, 0 = stop)", 0);
-        }
+            // x = readIntOrDefault("\nRun another iteration? (1 = yes, 0 = stop)", 0);
+        //}
 
         std::cout << "\nDone. Full report in " << REPORT_FILE << "\n";
 

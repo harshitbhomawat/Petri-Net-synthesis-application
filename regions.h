@@ -730,6 +730,46 @@ inline std::string regionCompact(const Region& r) {
     return out;
 }
 
+inline void writeDot(std::ostream& os, const PetriNet& pn) {
+    os << "digraph PetriNet {\n";
+    os << "  rankdir=LR;\n";
+    os << "  node [fontsize=10];\n\n";
+ 
+    // Places (circles)
+    for (size_t i = 0; i < pn.places.size(); ++i) {
+        os << "  p" << i << " [shape=circle, label=\"p" << i;
+        if (pn.initialMarking[i] > 0)
+            os << "\\n" << pn.initialMarking[i] << "*"; // "*" marks tokens
+        os << "\"];\n";
+    }
+    os << "\n";
+ 
+    // Transitions (boxes) -- quoted since event names are arbitrary strings
+    for (const auto& e : pn.transitions) {
+        os << "  \"" << e << "\" [shape=box, style=filled, "
+              "fillcolor=lightgray, label=\"" << e << "\"];\n";
+    }
+    os << "\n";
+ 
+    // place -> transition arcs
+    for (const auto& [p, m] : pn.placeToTrans)
+        for (const auto& [e, w] : m) {
+            os << "  p" << p << " -> \"" << e << "\"";
+            if (w != 1) os << " [label=\"" << w << "\"]";
+            os << ";\n";
+        }
+ 
+    // transition -> place arcs
+    for (const auto& [e, m] : pn.transToPlace)
+        for (const auto& [p, w] : m) {
+            os << "  \"" << e << "\" -> p" << p;
+            if (w != 1) os << " [label=\"" << w << "\"]";
+            os << ";\n";
+        }
+ 
+    os << "}\n";
+}
+
 inline void printPetriNet(std::ostream& os, const PetriNet& pn) {
     os << "Places (" << pn.places.size() << "):\n";
     for (size_t i = 0; i < pn.places.size(); ++i) {
