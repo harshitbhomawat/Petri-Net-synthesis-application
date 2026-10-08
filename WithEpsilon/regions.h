@@ -622,6 +622,129 @@ inline SynthesisSearchResult findMinimalKForSynthesis(const TransitionSystem& ts
     return best; // best.* holds kmax-bounded results (mining-only guarantee)
 }
 
+// =============================================================================
+// EPSILON-AUGMENTED REGION SYNTHESIS THEORY
+//
+// When a Transition System cannot achieve k-excitation closure at a given bound k,
+// classical synthesis fails bisimilarity. The epsilon-augmented synthesis theory
+// detects separation defects EC(e) \ ER(e) and inserts minimal silent transitions
+// (epsilon) to resolve state conflicts while preserving weak bisimulation.
+// =============================================================================
+
+struct SeparationDefect {
+    Event event;
+    std::set<State> violatingStates; // states in EC(e) \ ER(e) where event e is falsely enabled
+};
+
+inline std::vector<SeparationDefect> detectSeparationDefects(const TransitionSystem& ts,
+                                                            const std::vector<Region>& regions) {
+    std::vector<SeparationDefect> defects;
+    for (const auto& [event, _] : ts.event_transitions) {
+        auto ec = enablingClosure(event, ts, regions);
+        std::set<State> er = excitationRegionSet(event, ts);
+        if (!ec) {
+            // Event effectiveness failure: event has no preregion at all
+            defects.push_back({event, er});
+            continue;
+        }
+        std::set<State> badStates;
+        for (State s : *ec) {
+            if (!er.count(s)) badStates.insert(s);
+        }
+        if (!badStates.empty()) {
+            defects.push_back({event, badStates});
+        }
+    }
+    return defects;
+}
+
+// =============================================================================
+// PRINCIPLED EPSILON INSERTION — Connected-Component + Frontier Greedy Algorithm
+//
+// Instead of naively splitting every violating state, we:
+//   1. Cluster violating states into connected components via BFS over ALL TS edges.
+//   2. For each component, find the frontier: transitions (u --label--> v) where
+//      u is NOT in the component and v IS in it (entry boundary).
+//   3. Insert ONE epsilon by subdividing the best frontier edge:
+//         u --label--> v   becomes   u --label--> s_mid --eps_N--> v
+//      This gives the region solver a new intermediate state to use as a
+//      "firewall" so a place can be 1 at s_mid and 0 at v (or vice-versa),
+//      resolving the separation defect without touching the original structure.
+//   4. Re-evaluate synthesis.  If the defect is gone, stop. Otherwise repeat.
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// Helper: BFS-based connected-component clustering of a set of states.
+// Two states are "connected" if there is any TS transition (of any event)
+// directly between them (in either direction).
+// ---------------------------------------------------------------------------
+inline std::vector<std::set<State>> computeDefectComponents(
+        const TransitionSystem& ts,
+        const std::set<State>& violatingStates) {
+
+    // Build adjacency restricted to the violating states.
+    std::map<State, std::set<State>> adj;
+    for (const auto& [ev, tvec] : ts.event_transitions) {
+        for (const auto& t : tvec) {
+            if (violatingStates.count(t.pre) && violatingStates.count(t.post)) {
+                adj[t.pre].insert(t.post);
+                adj[t.post].insert(t.pre);
+            }
+        }
+    }
+
+    std::set<State> unvisited = violatingStates;
+    std::vector<std::set<State>> components;
+
+    while (!unvisited.empty()) {
+        State seed = *unvisited.begin();
+        std::set<State> comp;
+        std::queue<State> bfsQ;
+        bfsQ.push(seed);
+        comp.insert(seed);
+        unvisited.erase(seed);
+
+        while (!bfsQ.empty()) {
+            State cur = bfsQ.front(); bfsQ.pop();
+            if (adj.count(cur)) {
+                for (State nb : adj.at(cur)) {
+                    if (unvisited.count(nb)) {
+                        unvisited.erase(nb);
+                        comp.insert(nb);
+                        bfsQ.push(nb);
+                    }
+                }
+            }
+        }
+        components.push_back(std::move(comp));
+    }
+    return components;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: find all TS transitions entering a component from outside.
+// Returns (event, pre, post) triples where pre NOT in component, post IN component.
+// ---------------------------------------------------------------------------
+struct FrontierEdge {
+    Event  event;
+    State  pre;   // outside the component
+    State  post;  // inside the component
+};
+
+inline std::vector<FrontierEdge> computeFrontierEdges(
+        const TransitionSystem& ts,
+        const std::set<State>& component) {
+    std::vector<FrontierEdge> frontier;
+    for (const auto& [ev, tvec] : ts.event_transitions) {
+        for (const auto& t : tvec) {
+            if (!component.count(t.pre) && component.count(t.post)) {
+                frontier.push_back({ev, t.pre, t.post});
+            }
+        }
+    }
+    return frontier;
+}
+
 // ---------------------------------------------------------------------
 // Section 3 / Algorithm 1: BoundedPNDerivation
 //
@@ -707,6 +830,329 @@ inline PetriNet derivePetriNet(const TransitionSystem& ts,
             it = (it->second <= 0) ? m.erase(it) : std::next(it);
 
     return pn;
+}
+
+// ---------------------------------------------------------------------------
+// Identity Buffer Check:
+// An epsilon transition is an unconstrained identity buffer if:
+//   1. It has exactly one input place p_in with no other outputs (p_in has only epsName as output)
+//   2. p_in has a single input transition t_in.
+// In that case, epsName simply buffers tokens from t_in without resolving any choice or constraint.
+// Such silent transitions are useless and must never be synthesized.
+// ---------------------------------------------------------------------------
+inline bool isIdentityBuffer(const PetriNet& pn, const std::string& epsName) {
+    int inPlaces = 0;
+    int p_in = -1;
+    for (const auto& [p, tmap] : pn.placeToTrans) {
+        if (tmap.count(epsName) && tmap.at(epsName) > 0) {
+            inPlaces++;
+            p_in = p;
+        }
+    }
+    if (inPlaces != 1 || p_in == -1) return false;
+
+    // Check if p_in has any other output transitions
+    int outTransitionsFromP = 0;
+    if (pn.placeToTrans.count(p_in)) {
+        for (const auto& [t, w] : pn.placeToTrans.at(p_in)) {
+            if (w > 0) outTransitionsFromP++;
+        }
+    }
+    if (outTransitionsFromP != 1) return false;
+
+    // Check input transitions to p_in
+    int inTransitionsToP = 0;
+    for (const auto& [t, pmap] : pn.transToPlace) {
+        if (pmap.count(p_in) && pmap.at(p_in) > 0) inTransitionsToP++;
+    }
+    return (inTransitionsToP == 1);
+}
+
+// ---------------------------------------------------------------------------
+// Candidate Types for Epsilon Insertion:
+//   1. BRANCH_CHOICE: At a fork state u with out-degree >= 2, decouple an outgoing
+//      branch by turning u --e--> v into a silent decision u --eps--> v.
+//   2. SUBDIVISION: Subdivide a frontier transition u --e--> v into u --e--> s_mid --eps--> v.
+// ---------------------------------------------------------------------------
+enum class CandidateKind {
+    BRANCH_CHOICE,
+    SUBDIVISION
+};
+
+struct EpsilonCandidate {
+    CandidateKind kind;
+    FrontierEdge edge;
+    std::string description;
+};
+
+// ---------------------------------------------------------------------------
+// Collect all meaningful candidate transitions for a given defect.
+// ---------------------------------------------------------------------------
+inline std::vector<FrontierEdge> collectCandidateFrontierEdges(
+        const TransitionSystem& ts,
+        const Event& defectEvent,
+        const std::set<State>& violatingStates) {
+
+    std::vector<FrontierEdge> candidates;
+
+    // 1. Defect components entry boundaries
+    auto comps = computeDefectComponents(ts, violatingStates);
+    for (const auto& comp : comps) {
+        auto f = computeFrontierEdges(ts, comp);
+        candidates.insert(candidates.end(), f.begin(), f.end());
+    }
+
+    // 2. Excitation region entry boundary
+    auto er = excitationRegionSet(defectEvent, ts);
+    auto erFrontier = computeFrontierEdges(ts, er);
+    candidates.insert(candidates.end(), erFrontier.begin(), erFrontier.end());
+
+    // 3. Other events transitioning into ER(e)
+    for (const auto& [ev, tvec] : ts.event_transitions) {
+        if (ev == defectEvent) continue;
+        for (const auto& t : tvec) {
+            if (er.count(t.post)) {
+                candidates.push_back({ev, t.pre, t.post});
+            }
+        }
+    }
+
+    // Remove duplicates while preserving order
+    std::vector<FrontierEdge> uniqueCand;
+    for (const auto& c : candidates) {
+        bool exists = false;
+        for (const auto& u : uniqueCand) {
+            if (u.event == c.event && u.pre == c.pre && u.post == c.post) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) uniqueCand.push_back(c);
+    }
+
+    std::map<State, int> inDeg;
+    for (const auto& [ev, tvec] : ts.event_transitions)
+        for (const auto& t : tvec) inDeg[t.post]++;
+
+    std::sort(uniqueCand.begin(), uniqueCand.end(), [&](const FrontierEdge& a, const FrontierEdge& b) {
+        return inDeg[a.post] > inDeg[b.post];
+    });
+
+    return uniqueCand;
+}
+
+inline std::vector<EpsilonCandidate> collectEpsilonCandidates(
+        const TransitionSystem& ts,
+        const Event& defectEvent,
+        const std::set<State>& violatingStates) {
+
+    std::vector<EpsilonCandidate> candidates;
+
+    // 1. Branch Choice Decoupling Candidates:
+    // Identify branching states (forks with out-degree >= 2)
+    std::map<State, int> outDeg;
+    for (const auto& [ev, tvec] : ts.event_transitions) {
+        for (const auto& t : tvec) outDeg[t.pre]++;
+    }
+
+    for (const auto& [u, deg] : outDeg) {
+        if (deg >= 2) {
+            for (const auto& [ev, tvec] : ts.event_transitions) {
+                if (ev.rfind("eps_", 0) == 0) continue; // skip existing silent transitions
+                for (const auto& t : tvec) {
+                    if (t.pre == u && t.pre != t.post) { // non-self-loop outgoing branch
+                        EpsilonCandidate cand;
+                        cand.kind = CandidateKind::BRANCH_CHOICE;
+                        cand.edge = {ev, t.pre, t.post};
+                        cand.description = "Silent branch choice at fork s" + std::to_string(u) + 
+                                           " (decouples " + ev + " branch entering s" + std::to_string(t.post) + ")";
+                        candidates.push_back(cand);
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Structural Frontier Edge Subdivision Candidates:
+    auto frontierEdges = collectCandidateFrontierEdges(ts, defectEvent, violatingStates);
+    for (const auto& fe : frontierEdges) {
+        EpsilonCandidate cand;
+        cand.kind = CandidateKind::SUBDIVISION;
+        cand.edge = fe;
+        cand.description = "Subdivide frontier edge s" + std::to_string(fe.pre) + 
+                           " --" + fe.event + "--> s" + std::to_string(fe.post);
+        candidates.push_back(cand);
+    }
+
+    return candidates;
+}
+
+inline TransitionSystem applyCandidate(
+        const TransitionSystem& ts,
+        const EpsilonCandidate& cand,
+        const std::string& epsName) {
+
+    TransitionSystem trial = ts;
+    if (cand.kind == CandidateKind::BRANCH_CHOICE) {
+        auto& tvec = trial.event_transitions[cand.edge.event];
+        std::vector<Transition> newVec;
+        bool removed = false;
+        for (const auto& t : tvec) {
+            if (!removed && t.pre == cand.edge.pre && t.post == cand.edge.post) {
+                removed = true;
+                continue;
+            }
+            newVec.push_back(t);
+        }
+        trial.event_transitions[cand.edge.event] = newVec;
+        trial.event_transitions[epsName].push_back({cand.edge.pre, cand.edge.post});
+    } else { // SUBDIVISION
+        State sMid = trial.numStates++;
+        auto& tvec = trial.event_transitions[cand.edge.event];
+        bool replaced = false;
+        for (auto& t : tvec) {
+            if (!replaced && t.pre == cand.edge.pre && t.post == cand.edge.post) {
+                t.post = sMid;
+                replaced = true;
+            }
+        }
+        trial.event_transitions[epsName].push_back({sMid, cand.edge.post});
+    }
+    return trial;
+}
+
+// Helper: count total separation defects across original events only.
+inline int countOriginalSeparationDefects(const TransitionSystem& ts,
+                                         const std::set<Event>& origEvents,
+                                         const std::vector<Region>& regions) {
+    auto defects = detectSeparationDefects(ts, regions);
+    int total = 0;
+    for (const auto& d : defects) {
+        if (origEvents.count(d.event)) total += static_cast<int>(d.violatingStates.size());
+    }
+    return total;
+}
+
+struct EpsilonSynthesisResult {
+    int k = 0;
+    bool bisimilarAchieved = false;
+    bool epsilonAssisted = false;
+    TransitionSystem augmentedTS;
+    SynthesisSearchResult searchResult;
+    std::map<std::string, std::string> epsilonTransitions; // epsName -> purpose
+};
+
+// ---------------------------------------------------------------------------
+// Top-level driver for Epsilon-Augmented Synthesis:
+// 1. Tries standard visible synthesis up to kmax.
+// 2. If bisimilarity achieved without epsilon, returns standard net (0 epsilons).
+// 3. If k-ECTS fails, runs principled greedy minimal epsilon insertion:
+//      - Gathers branch choice decouplers and structural boundary candidates.
+//      - Tests candidates 1-by-1:
+//        * Rejects any candidate that creates an unconstrained identity buffer.
+//        * Accepts ONLY if bisimilarity is achieved or defect count strictly decreases.
+//      - Stops immediately once bisimilarity is reached.
+//      - Caps total epsilon count at a strict minimal bound (at most 2 epsilons).
+// ---------------------------------------------------------------------------
+inline EpsilonSynthesisResult findMinimalKWithEpsilonSynthesis(const TransitionSystem& ts,
+                                                               int kmax,
+                                                               bool reduceToIrredundantCover = true) {
+    EpsilonSynthesisResult res;
+    res.augmentedTS = ts;
+
+    // Phase 1: Try standard visible synthesis
+    res.searchResult = findMinimalKForSynthesis(ts, kmax, reduceToIrredundantCover);
+    res.k = res.searchResult.k;
+    res.bisimilarAchieved = res.searchResult.bisimilarPossible;
+
+    if (res.bisimilarAchieved) {
+        return res; // Pure visible synthesis succeeded — no epsilons needed.
+    }
+
+    // Collect the ORIGINAL event set (before any augmentation).
+    std::set<Event> originalEvents;
+    for (const auto& [ev, _] : ts.event_transitions)
+        originalEvents.insert(ev);
+
+    // Initial baseline defect count
+    int currentDefects = countOriginalSeparationDefects(ts, originalEvents, res.searchResult.irredundantCover);
+    if (currentDefects == 0) {
+        return res;
+    }
+
+    // Phase 2: Principled Greedy Epsilon Insertion
+    const int maxEpsilons = 2;
+    int epsCounter = 1;
+
+    TransitionSystem curTS = ts;
+    SynthesisSearchResult curResult = res.searchResult;
+
+    while (epsCounter <= maxEpsilons && currentDefects > 0 && !curResult.bisimilarPossible) {
+        auto allDefects = detectSeparationDefects(curTS, curResult.irredundantCover);
+        std::vector<SeparationDefect> origDefects;
+        for (const auto& d : allDefects) {
+            if (originalEvents.count(d.event)) origDefects.push_back(d);
+        }
+        if (origDefects.empty()) break;
+
+        // Sort defect events by number of violating states descending
+        std::sort(origDefects.begin(), origDefects.end(), [](const auto& a, const auto& b) {
+            return a.violatingStates.size() > b.violatingStates.size();
+        });
+
+        bool acceptedCandidate = false;
+
+        for (const auto& defect : origDefects) {
+            auto candidates = collectEpsilonCandidates(curTS, defect.event, defect.violatingStates);
+
+            for (const auto& cand : candidates) {
+                std::string ename = "eps_" + std::to_string(epsCounter);
+                TransitionSystem trialTS = applyCandidate(curTS, cand, ename);
+
+                // Re-evaluate synthesis on trial TS
+                auto trialResult = findMinimalKForSynthesis(trialTS, kmax, reduceToIrredundantCover);
+
+                // Derive Petri net to verify its structure
+                PetriNet trialPN = derivePetriNet(trialTS, trialResult.irredundantCover);
+
+                // STRICT FILTER: Reject any candidate that results in a useless identity buffer
+                if (isIdentityBuffer(trialPN, ename)) {
+                    continue;
+                }
+
+                int trialDefects = countOriginalSeparationDefects(trialTS, originalEvents, trialResult.irredundantCover);
+
+                // STRICT VALIDATION: Accept ONLY if bisimilar achieved or defects strictly decreased
+                if (trialResult.bisimilarPossible || trialDefects < currentDefects) {
+                    curTS = trialTS;
+                    curResult = trialResult;
+                    currentDefects = trialDefects;
+
+                    res.epsilonTransitions[ename] = cand.description;
+                    epsCounter++;
+                    acceptedCandidate = true;
+                    if (trialResult.bisimilarPossible) {
+                        break; // Bisimilar reached! Stop immediately!
+                    }
+                }
+            }
+
+            if (acceptedCandidate) break;
+        }
+
+        // If no candidate improved the defect count or achieved bisimilarity, stop cleanly
+        if (!acceptedCandidate) {
+            break;
+        }
+    }
+
+    res.augmentedTS = curTS;
+    res.searchResult = curResult;
+    res.k = curResult.k;
+    res.bisimilarAchieved = curResult.bisimilarPossible;
+    res.epsilonAssisted = !res.epsilonTransitions.empty();
+
+    return res;
 }
 
 // ---------------------------------------------------------------------
@@ -813,8 +1259,14 @@ inline void writeDot(std::ostream& os, const PetriNet& pn) {
  
     // Transitions (boxes) -- quoted since event names are arbitrary strings
     for (const auto& e : pn.transitions) {
-        os << "  \"" << e << "\" [shape=box, style=filled, "
-              "fillcolor=lightgray, label=\"" << e << "\"];\n";
+        if (e.rfind("eps_", 0) == 0 || e == "epsilon" || e == "tau") {
+            // Silent/epsilon transition: rendered as black narrow bar (standard academic notation)
+            os << "  \"" << e << "\" [shape=box, style=filled, fillcolor=black, "
+                  "fontcolor=white, width=0.15, height=0.6, label=\"" << e << "\"];\n";
+        } else {
+            os << "  \"" << e << "\" [shape=box, style=filled, "
+                  "fillcolor=lightgray, label=\"" << e << "\"];\n";
+        }
     }
     os << "\n";
  

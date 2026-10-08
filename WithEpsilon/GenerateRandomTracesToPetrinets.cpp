@@ -174,16 +174,28 @@ int main() {
             std::cout << "States: " << ts.states.size()
                       << ", Event types: " << ts.event_transitions.size() << "\n";
 
-            // ---- region synthesis (fixed regions.h library) ----
+            // ---- region synthesis with epsilon-transition assistance ----
             regions::TransitionSystem rts = toRegionsTS(ts);
-            regions::SynthesisSearchResult result = regions::findMinimalKForSynthesis(rts, kmax);
-            regions::PetriNet pn = regions::derivePetriNet(rts, result.irredundantCover);
+            regions::EpsilonSynthesisResult epsRes = regions::findMinimalKWithEpsilonSynthesis(rts, kmax);
+            regions::SynthesisSearchResult result = epsRes.searchResult;
+            regions::PetriNet pn = regions::derivePetriNet(epsRes.augmentedTS, result.irredundantCover);
 
             std::cout << "  k=" << result.k
-                      << (result.bisimilarPossible
-                              ? " (bisimilar synthesis possible)"
-                              : " (bisimilar NOT reached by kmax -- mining-only PN)")
+                      << (epsRes.epsilonAssisted
+                              ? (result.bisimilarPossible
+                                    ? " (bisimilar synthesis achieved WITH epsilon assistance)"
+                                    : " (epsilon-assisted; bisimilar NOT reached by kmax)")
+                              : (result.bisimilarPossible
+                                    ? " (bisimilar synthesis possible WITHOUT epsilon)"
+                                    : " (bisimilar NOT reached by kmax -- mining-only PN)"))
                       << ", cover size=" << result.irredundantCover.size() << "\n";
+            if (epsRes.epsilonAssisted) {
+                std::cout << "  [Epsilon Aid] Inserted " << epsRes.epsilonTransitions.size()
+                          << " silent transition(s) to resolve state-separation conflicts:\n";
+                for (const auto& [ename, epurpose] : epsRes.epsilonTransitions) {
+                    std::cout << "    * " << ename << ": " << epurpose << "\n";
+                }
+            }
 
             std::string dotFile = "output/iteration_" + std::to_string(iteration) + ".dot";
             std::ofstream dotOut(dotFile);
@@ -208,8 +220,20 @@ int main() {
 
             out << "### Region synthesis result\n\n";
             out << "- Smallest k reached: **" << result.k << "**\n";
-            out << "- Excitation closed (bisimilar synthesis possible): **"
-                << (result.bisimilarPossible ? "YES" : "NO (mining-only overapproximation)") << "**\n\n";
+            out << "- Excitation closed (bisimilar): **"
+                << (result.bisimilarPossible
+                        ? (epsRes.epsilonAssisted ? "YES (via epsilon transitions)" : "YES")
+                        : "NO (mining-only overapproximation)") << "**\n";
+            if (epsRes.epsilonAssisted) {
+                out << "- Epsilon assistance: **YES (" << epsRes.epsilonTransitions.size()
+                    << " silent transition(s) added)**\n\n";
+                for (const auto& [ename, epurpose] : epsRes.epsilonTransitions) {
+                    out << "  * `" << ename << "`: " << epurpose << "\n";
+                }
+                out << "\n";
+            } else {
+                out << "- Epsilon assistance needed: **NO**\n\n";
+            }
 
             writeRegionsSection(out, "All minimal k-bounded regions", result.minimalRegions);
             writeRegionsSection(out, "Irredundant cover (used to derive the Petri net below)",

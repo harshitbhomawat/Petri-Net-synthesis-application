@@ -57,7 +57,6 @@ static const char* ALL_TRACES_FILE  = "output/AllPossibleTraces.txt";
 static const char* REPORT_FILE      = "output/synthesis_report.md";
 static const int   DEFAULT_KMAX     = 3;
 static const int   DEFAULT_N_TRACES = 4;
-static const int   DEFAULT_REPEAT_THRESHOLD = 3;
 static const int   INITIAL_STATE_OVERRIDE = 0; // <-- adjust if your TS exposes a real initial state
 // ============================================================
 
@@ -143,7 +142,6 @@ int main() {
         // std::cout << "Total traces generated: " << total << "\n\n";
 
         int kmax = readIntOrDefault("Max region-weight bound to search (kmax)", DEFAULT_KMAX);
-        int repeatThreshold = readIntOrDefault("Repetition threshold to treat as loop (x)", DEFAULT_REPEAT_THRESHOLD);
 
         // Fresh report for this run.
         {
@@ -152,13 +150,12 @@ int main() {
             reset << "# Region-based synthesis report\n\n"
                   << "Run started: " << timestamp() << "\n\n"
                   << "kmax for this run: " << kmax << "\n\n"
-                  << "Repetition threshold (x) for loop inference: " << repeatThreshold << "\n\n"
                   << "---\n\n";
         }
 
         int iteration = 0;
-        int runAnother = 1;
-        while (runAnother) {
+        int x = 5;
+        while (x) {
             ++iteration;
             std::cout << "\n--- Iteration " << iteration << " ---\n";
 
@@ -167,9 +164,9 @@ int main() {
             std::string selectedFile = "output/SelectedTraces_iter" + std::to_string(iteration) + ".txt";
             //pickRandomTraces(ALL_TRACES_FILE, n, selectedFile);
 
-            // ---- build TS with loop inference from repetitions ----
+            // ---- build TS (your existing, working class) ----
             TransitionSystem ts;
-            ts.loadFromTraceFileWithRepetitions(selectedFile, repeatThreshold);
+            ts.loadFromTraceFile(selectedFile);
 
             std::cout << "States: " << ts.states.size()
                       << ", Event types: " << ts.event_transitions.size() << "\n";
@@ -200,8 +197,7 @@ int main() {
 
             out << "## Iteration " << iteration << " -- " << timestamp() << "\n\n";
             out << "- Requested random traces (n): " << n << "\n";
-            out << "- kmax searched: " << kmax << "\n";
-            out << "- Repetition threshold (x): " << repeatThreshold << "\n\n";
+            out << "- kmax searched: " << kmax << "\n\n";
 
             writeSelectedTraces(out, selectedFile);
             writeTransitionSystem(out, ts);
@@ -224,7 +220,7 @@ int main() {
 
             std::cout << "  Report section written to " << REPORT_FILE << "\n";
 
-            runAnother = readIntOrDefault("\nRun another iteration? (1 = yes, 0 = stop)", 0);
+            x = readIntOrDefault("\nRun another iteration? (1 = yes, 0 = stop)", 0);
         }
 
         std::cout << "\nDone. Full report in " << REPORT_FILE << "\n";

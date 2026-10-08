@@ -1,0 +1,502 @@
+================================================================================
+          EPSILON-AUGMENTED PETRI NET SYNTHESIS: THEORY & IMPLEMENTATION
+================================================================================
+Author: Harshit (MTP Project)
+Topic: Extending Region-Based Synthesis Theory to Support Useful Epsilon Transitions
+File: EpsilonTheoryExplanation.txt
+Date: 2026-10-06
+
+--------------------------------------------------------------------------------
+TABLE OF CONTENTS
+--------------------------------------------------------------------------------
+1. INTRODUCTION & MOTIVATION
+2. CLASSICAL REGION THEORY (EXISTING SYNTHESIS ALGORITHM)
+   2.1. Transition Systems and Bounded Regions
+   2.2. The Constant Gradient Condition
+   2.3. Pre-regions, Excitation Regions, and k-ECTS
+   2.4. Minimal Regions & Irredundant Covers
+   2.5. Algorithm 1: Deriving the Bounded Petri Net
+3. THE FUNDAMENTAL LIMITATION OF VISIBLE SYNTHESIS
+   3.1. Conflicting Event Roles Across Branches
+   3.2. Why Constant Gradient Blocks Visible Separation
+   3.3. Canonical Benchmark: (a b* c) + (a c b*)
+4. EPSILON-AUGMENTED SYNTHESIS: THE EXTENSION
+   4.1. The Principle of Epsilon Transitions in Petri Nets
+   4.2. Why Naive Subdivision Fails (Identity Buffer Problem)
+   4.3. The New Synthesis Pipeline (Step-by-Step)
+   4.4. Candidate Generation: Branch Choice Decoupling vs. Subdivision
+   4.5. The Identity Buffer Filter
+   4.6. Coexistence with Constant Gradient and Minimal Regions
+5. DETAILED STEP-BY-STEP WALKTHROUGH ON (a b* c) + (a c b*)
+   5.1. Transition System Construction
+   5.2. Failure of Visible Synthesis (Separation Defect)
+   5.3. Epsilon Candidate Evaluation & Selection
+   5.4. Synthesized 2-Bounded Petri Net Structure
+   5.5. Reachability Analysis & Explanation of Token Dynamics
+6. SUMMARY & CONTRIBUTIONS FOR MTP THESIS
+
+================================================================================
+1. INTRODUCTION & MOTIVATION
+================================================================================
+Petri net synthesis is the automated construction of a Petri net from a behavioral
+specification, typically given as a Transition System (TS) derived from execution
+traces. Classical region theory (Ehrenfeucht & Rozenberg 1990; Cortadella et al.
+1998; Carmona, Cortadella, Kishinevsky 2010) establishes exact mathematical
+conditions under which a Transition System is isomorphic or bisimilar to the reachability
+graph of a Petri net.
+
+However, classical synthesis assumes that every event in the Petri net corresponds
+one-to-one with a visible event in the Transition System (T = E, no label splitting,
+no silent transitions). Under this restriction, many common concurrent behaviors
+cannot be synthesized into a Petri net without either:
+  (a) Label splitting (creating multiple transitions with identical names: c_1, c_2),
+      which obscures the identity of events and breaks trace alignment.
+  (b) Over-approximating the language (allowing invalid traces that violate safety).
+
+In this work, we extend classical region-based synthesis to systematically and
+minimally introduce epsilon (silent / tau) transitions when visible synthesis fails.
+The goal is to automatically discover useful silent transitions that resolve
+state-separation conflicts while strictly prohibiting useless identity buffers.
+
+================================================================================
+2. CLASSICAL REGION THEORY (EXISTING SYNTHESIS ALGORITHM)
+================================================================================
+Our base implementation is based on the general multiset region formulation
+established by J. Carmona, J. Cortadella, and M. Kishinevsky (IEEE Transactions on
+Computers, 2010): "New Region-Based Algorithms for Deriving Bounded Petri Nets".
+
+2.1. TRANSITION SYSTEMS AND BOUNDED REGIONS
+-------------------------------------------
+Let TS = (S, E, T_s, s_0) be a Transition System, where:
+  - S is a finite set of states.
+  - E is a finite set of events (labels).
+  - T_s subseteq S x E x S is the set of labeled transitions (s --e--> s').
+  - s_0 in S is the initial state.
+
+A k-bounded region r is a multiset of states represented as a vector:
+    r : S -> {0, 1, ..., k}
+where r(s) denotes the multiplicity (or weight) of region r at state s.
+Each region r will correspond to exactly one place p_r in the synthesized Petri net,
+and r(s) represents the token marking of place p_r when the TS is in state s.
+
+2.2. THE CONSTANT GRADIENT CONDITION
+------------------------------------
+A fundamental axiom of Petri net execution is that whenever a transition fires,
+it adds a fixed number of tokens to each post-place and removes a fixed number of
+tokens from each pre-place, regardless of which state it fired from.
+
+Consequently, for any valid region r and any event e in E, the difference in
+region values across every transition labeled with e must be identical:
+    For all (s --e--> s') in T_s:
+        r(s') - r(s) = Delta_r(e) = const
+
+Delta_r(e) is called the gradient of region r on event e:
+  - If Delta_r(e) > 0: event e produces Delta_r(e) tokens into place p_r.
+  - If Delta_r(e) < 0: event e consumes |Delta_r(e)| tokens from place p_r.
+  - If Delta_r(e) = 0: event e has a net change of 0 tokens on place p_r (e.g., self-loop or independent).
+
+2.3. PRE-REGIONS, EXCITATION REGIONS, AND k-ECTS
+-----------------------------------------------
+For each event e in E:
+  - The Excitation Region ER(e) is the set of states where e is enabled:
+        ER(e) = { s in S | exists s': (s --e--> s') in T_s }
+  - The Switching Region SR(e) is the set of states entered by firing e:
+        SR(e) = { s' in S | exists s: (s --e--> s') in T_s }
+
+A region r is called a pre-region of event e if:
+  1. Delta_r(e) < 0, OR
+  2. Delta_r(e) >= 0 and r(s) >= 1 for all s in ER(e).
+
+The Excitation Closure condition (k-ECTS) determines whether a synthesized Petri
+net will be bisimilar to the Transition System:
+    A Transition System TS is k-excitation-closed if for every event e in E
+    and every state s NOT in ER(e), there exists a k-bounded region r such that:
+        r(s) < max_k_top(r, e)
+    where max_k_top(r, e) = min_{s' in ER(e)} r(s').
+
+In Petri net terms: this ensures that whenever event e is NOT allowed to fire,
+at least one of its input places p_r has fewer tokens than the required arc weight,
+physically preventing e from firing illegally.
+
+2.4. MINIMAL REGIONS & IRREDUNDANT COVERS
+-----------------------------------------
+Regions form a convex cone under multiset addition: if r_1 and r_2 are regions,
+r_1 + r_2 is also a region.
+A region is MINIMAL if it cannot be expressed as a non-trivial sum of other regions.
+Minimal regions correspond to the most constraining, non-redundant places.
+
+From the set of all minimal regions, Algorithm 2 of Carmona et al. extracts an
+IRREDUNDANT COVER: the minimal subset of regions needed to satisfy:
+  1. Pre-region condition for all events.
+  2. State separation condition for all states.
+  3. Excitation closure (k-ECTS) for all disabled events.
+
+2.5. ALGORITHM 1: DERIVING THE BOUNDED PETRI NET
+------------------------------------------------
+Given an irredundant region cover R = {r_1, ..., r_m}:
+  - Places: each region r_i becomes a place p_i.
+  - Initial Marking: M_0(p_i) = r_i(s_0).
+  - Transitions: each event e in E becomes a transition.
+  - Place-to-Transition Arcs (W(p_i -> e)):
+      If r_i is a pre-region of e:
+          g = max_k_top(r_i, e)
+          W(p_i -> e) += g
+          If Delta_{r_i}(e) > -g:
+              W(e -> p_i) += (g + Delta_{r_i}(e))
+  - Transition-to-Place Arcs (W(e -> p_i)):
+      If r_i is a post-region of e and Delta_{r_i}(e) > 0:
+          W(e -> p_i) += Delta_{r_i}(e).
+
+================================================================================
+3. THE FUNDAMENTAL LIMITATION OF VISIBLE SYNTHESIS
+================================================================================
+3.1. CONFLICTING EVENT ROLES ACROSS BRANCHES
+--------------------------------------------
+A fundamental structural conflict occurs when the same visible event e performs
+opposing control-flow roles in two different branches of execution:
+  - Branch 1: Event e is a TERMINATOR. It fires at the end of the branch and must
+    permanently DISABLE subsequent actions (e.g., event b).
+  - Branch 2: Event e is an INITIATOR. It fires at the start of the branch and must
+    permanently ENABLE subsequent actions (e.g., event b).
+
+3.2. WHY CONSTANT GRADIENT BLOCKS VISIBLE SEPARATION
+---------------------------------------------------
+Let us analyze why classical visible region theory cannot synthesize this:
+  - In Branch 2, event e must enable event b. Therefore, for every place p in the
+    preset of b (p in \bullet b), firing e must deposit sufficient tokens into p.
+    This requires Delta_r(e) >= +1 for all pre-regions of b.
+  - In Branch 1, event e fires to terminate. But by the Constant Gradient axiom:
+        Delta_r(e) must be identical across ALL transitions of e!
+  - Therefore, whenever e fires in Branch 1, it is mathematically forced to deposit
+    the exact same +1 token into place p!
+  - Consequently, place p is replenished with tokens, and event b remains enabled
+    after e in Branch 1 as well!
+
+Because of this constant gradient constraint, NO visible region can ever separate
+the terminal state of Branch 1 from the active state of Branch 2.
+The classical algorithm reports a persistent separation defect:
+    "Event 'b' violating state s_terminal"
+and fails to achieve bisimilarity (bisimilarPossible = false) for all k <= k_max.
+
+3.3. CANONICAL BENCHMARK: (a b* c) + (a c b*)
+---------------------------------------------
+Consider the language L = (a b* c) + (a c b*):
+  - In branch (a b* c): after a, b may repeat zero or more times, then c terminates.
+    After c, event b must NEVER fire. Sequence "a b b c b b b" is ILLEGAL.
+  - In branch (a c b*): after a, c fires first, then b may repeat zero or more times.
+    Before c, b must NEVER fire.
+Here, event c initiates b* in Branch 2, but terminates b* in Branch 1.
+Without silent transitions or label splitting, visible synthesis CANNOT model this language.
+
+================================================================================
+4. EPSILON-AUGMENTED SYNTHESIS: THE EXTENSION
+================================================================================
+4.1. THE PRINCIPLE OF EPSILON TRANSITIONS IN PETRI NETS
+-------------------------------------------------------
+An epsilon (silent / tau) transition represents an internal, unobservable system step.
+In language theory, projecting the language of a Petri net onto the visible alphabet
+E_vis = E \ {eps} erases epsilon steps:
+    proj_{E_vis}(a . eps_1 . b . c) = a . b . c
+In structural synthesis, epsilon transitions serve a vital role:
+    THEY INTRODUCE INTERNAL NON-DETERMINISM (BRANCH CHOICE DECOUPLING)
+By firing silently, an epsilon transition can change the token distribution of
+places before any visible event occurs, committing the Petri net to a specific
+branch without consuming or producing visible events.
+
+4.2. WHY NAIVE SUBDIVISION FAILS (THE IDENTITY BUFFER PROBLEM)
+--------------------------------------------------------------
+A common naive proposal for inserting epsilon transitions is edge subdivision:
+    Given transition:  u --c--> v
+    Replace with:      u --c--> s_mid --eps--> v
+
+Why this fails in region synthesis:
+When state s_mid is created with in-degree 1 (from c) and out-degree 1 (to eps),
+the region solver groups s_mid into an isolated place p_0:
+    c -> p_0 -> eps -> p_target
+Notice what happens:
+  - Firing c puts a token in p_0.
+  - Transition eps simply takes that token from p_0 and passes it to p_target.
+  - Eps does not resolve any choice, does not branch, and does not alter control flow.
+This is a USELESS IDENTITY BUFFER:
+    "Instead of c -> p_0 -> eps -> p_3, we can directly connect c -> p_3 and the
+     Petri net behaves identically."
+Moreover, edge subdivision does NOT fix the constant gradient conflict because
+c still enters both branches!
+
+4.3. THE NEW SYNTHESIS PIPELINE (STEP-BY-STEP)
+----------------------------------------------
+Our new algorithm implements a principled 5-phase pipeline:
+
+PHASE 1: VISIBLE SYNTHESIS SEARCH
+  - Run classical k-bounded synthesis up to k_max on the original TS.
+  - If bisimilarity is achieved (k-ECTS holds with 0 defects), return the
+    pure visible Petri net immediately. (Zero epsilon transitions added).
+
+PHASE 2: DEFECT DIAGNOSIS
+  - If visible synthesis fails, identify the separation defect:
+    Find all events e where ER(e) does not equal the states satisfying pre-region bounds.
+    Record the violating states S_violating = { s in S | e disabled at s but enabled by regions }.
+
+PHASE 3: STRUCTURAL CANDIDATE GENERATION
+  - Instead of blind subdivision, gather structural candidates:
+    (A) Silent Branch Choice Candidates (BRANCH_CHOICE):
+        Scan all fork states u (states with out-degree >= 2).
+        For each outgoing visible edge u --e'--> v:
+        Create a candidate to replace u --e'--> v with a silent choice:
+            u --eps--> v
+        (allowing internal non-determinism to configure the net before visible actions).
+    (B) Structural Frontier Subdivision (SUBDIVISION):
+        Compute the boundary edges entering ER(e) or the defect components.
+
+PHASE 4: IDENTITY BUFFER FILTER
+  - For each trial candidate:
+    1. Augment the TS with the candidate epsilon.
+    2. Run region synthesis on the trial TS.
+    3. Deriving the trial Petri net.
+    4. Apply the Identity Buffer Detector:
+       Check if eps has exactly 1 input place p_in with no other outputs (p_in^\bullet = {eps}),
+       and p_in has exactly 1 input transition (\bullet p_in = {t_in}).
+    5. IF IT IS AN IDENTITY BUFFER: REJECT THE CANDIDATE IMMEDIATELY!
+
+PHASE 5: STRICT GREEDY ACCEPTANCE
+  - Accept a candidate ONLY if:
+    (a) It is NOT an identity buffer, AND
+    (b) It either achieves 100% bisimilarity (k-ECTS) OR strictly decreases the
+        original defect count.
+  - As soon as bisimilarity is achieved, HALT and return the minimal net.
+
+4.4. CANDIDATE GENERATION: BRANCH CHOICE DECOUPLING VS. SUBDIVISION
+-------------------------------------------------------------------
+Let u be a decision state (fork) where branches diverge:
+  - Branch 1: u --b--> v_1 (where b loops and c terminates)
+  - Branch 2: u --c--> v_2 (where c initiates and b loops)
+
+By generating a Branch Choice candidate on u --b--> v_1:
+  We replace u --b--> v_1 with u --eps_1--> v_1.
+At state u, the choice is now between:
+  - Firing eps_1 (silent choice into Branch 1)
+  - Firing c (visible choice into Branch 2)
+In Branch 1, since the loop v_1 --b--> v_1 is already present at v_1, event b
+is still available and can fire any number of times (b*).
+Thus, the visible language is COMPLETELY PRESERVED, while the branching conflict
+is cleanly decoupled!
+
+4.5. THE IDENTITY BUFFER FILTER (MATHEMATICAL DEFINITION)
+---------------------------------------------------------
+Let PN = (P, T, W, M_0) be the Petri net derived from a trial TS with silent
+transition eps.
+Transition eps is an UNCONSTRAINED IDENTITY BUFFER if and only if:
+  1. | \bullet eps | = 1 (eps has exactly one input place p_in).
+  2. p_in^\bullet = {eps} (p_in has no other output transitions).
+  3. | \bullet p_in | = 1 (p_in has exactly one input transition t_in).
+
+Why this condition is sound:
+When conditions 1-3 hold:
+  - Every time t_in fires, it deposits tokens into p_in.
+  - No transition other than eps can consume from p_in.
+  - Transition eps requires no tokens from any other place.
+Therefore, eps fires unconditionally after t_in without participating in any
+conflict, synchronization, or branch decision. Replacing t_in -> p_in -> eps -> post(eps)
+with direct arcs t_in -> post(eps) yields an identical visible reachability graph.
+Filtering out such transitions eliminates all useless epsilon buffers.
+
+4.6. COEXISTENCE WITH CONSTANT GRADIENT AND MINIMAL REGIONS
+-----------------------------------------------------------
+A crucial theoretical question is: How does this extension coexist with the
+axioms of Region Theory (constant gradient, minimal regions)?
+
+1. Epsilon is treated as a first-class event in Region Theory:
+   The augmented Transition System TS_aug has alphabet E_aug = E_vis union {eps_1}.
+   Every region r must satisfy the Constant Gradient condition for ALL events,
+   including eps_1:
+       r(s') - r(s) = Delta_r(eps_1) = const   for all s --eps_1--> s'.
+
+2. Extra Degree of Freedom in the Region Cone:
+   In visible synthesis, the region equations for states in Branch 1 and Branch 2
+   were over-constrained because transitions between branches shared visible events.
+   Introducing eps_1 adds an independent gradient variable Delta_r(eps_1) to the
+   linear system of region constraints.
+   This extra degree of freedom splits the single over-constrained region cone
+   into independent sub-cones, allowing the solver to find regions that separate
+   Branch 1 terminal states from Branch 2 active states.
+
+3. Minimal Regions & Irredundant Covers Remain Proven:
+   Because the region solver operates on TS_aug using Carmona's exact Algorithm 2,
+   all mathematical properties are preserved:
+   - Every place corresponds to a valid minimal multiset region.
+   - The derived Petri net is guaranteed to be k-bounded (here k=2).
+   - Excitation closure guarantees full behavioral bisimulation.
+
+================================================================================
+5. DETAILED STEP-BY-STEP WALKTHROUGH ON (a b* c) + (a c b*)
+================================================================================
+Let us trace the complete execution on Iteration 2 of the application.
+
+5.1. TRANSITION SYSTEM CONSTRUCTION
+-----------------------------------
+Input Traces from SelectedTraces_iter2.txt:
+  1: a->c
+  2: a->c->b
+  3: a->b->c
+  4: a->b->b->c
+  5: a->c->b->b
+  6: a->b->b->b->c
+  7: a->c->b->b->b
+
+In TransitionSystem.cpp:
+- inferRegexFromTrace detects repetitions:
+    a->b->b->b->c  -->  a->b->(b)*->c
+    a->c->b->b->b  -->  a->c->b->(b)*
+- Loop-first compilation builds the clean 6-state Transition System:
+    State 0: Initial state
+    0 --a--> 1
+    Branch 1: 1 --b--> 2,  2 --b--> 2,  2 --c--> 3 (terminal)
+    Branch 2: 1 --c--> 4,  4 --b--> 5,  5 --b--> 5
+States: 6, Event types: 3 (a, b, c).
+No spurious states. Path "abbcbbb" is completely blocked.
+
+5.2. FAILURE OF VISIBLE SYNTHESIS
+---------------------------------
+Running classical visible synthesis for bounds k = 1, 2, 3:
+  - k = 1: bisimilar = false (Defect on b at state s3)
+  - k = 2: bisimilar = false (Defect on b at state s3)
+  - k = 3: bisimilar = false (Defect on b at state s3)
+
+Reason for defect:
+  - State s3 is the state after 2 --c--> 3. Event b is NOT enabled at s3.
+  - State s4 is the state after 1 --c--> 4. Event b IS enabled at s4.
+  - Since event c enters both s3 and s4, the constant gradient Delta_r(c) forces
+    r(s3) - r(s2) = Delta_r(c) = r(s4) - r(s1).
+  - Any region giving tokens to s4 to enable b also gives tokens to s3, illegally
+    enabling b at s3.
+
+5.3. EPSILON CANDIDATE EVALUATION & SELECTION
+---------------------------------------------
+Phase 3 scans fork states:
+  - Fork state s1 has out-degree 2:
+      Edge 1: 1 --b--> 2
+      Edge 2: 1 --c--> 4
+  - Candidate 1: BRANCH_CHOICE on 1 --b--> 2.
+      Trial TS: replace 1 --b--> 2 with 1 --eps_1--> 2.
+  - Synthesizing Trial TS:
+      k = 1: bisimilar = false
+      k = 2: bisimilar = TRUE!
+  - Evaluating Identity Buffer Detector on derived Petri Net:
+      inPlaces(eps_1) = 2 (p0 and p3) != 1.
+      isIdentityBuffer = FALSE!
+  - Strict validation: Bisimilarity achieved! Epsilon count = 1.
+  - Candidate ACCEPTED! Greedy loop halts.
+
+5.4. SYNTHESIZED 2-BOUNDED PETRI NET STRUCTURE
+----------------------------------------------
+The resulting Petri net is written to output/iteration_2.dot:
+
+Places (4):
+  p0 = {s1, s2}            (Initial marking: 0)
+  p1 = {s0}                (Initial marking: 1)
+  p2 = {s2, s3^2, s4, s5}  (Initial marking: 0)
+  p3 = {s1^2, s2, s4, s5}  (Initial marking: 0)
+
+Transitions (4): a, b, c, eps_1
+
+Arcs Place -> Transition:
+  p0 --1--> c
+  p0 --1--> eps_1
+  p1 --1--> a
+  p2 --1--> b
+  p3 --1--> b
+  p3 --1--> c
+  p3 --2--> eps_1
+
+Arcs Transition -> Place:
+  a --1--> p0
+  a --2--> p3
+  b --1--> p2
+  b --1--> p3
+  c --1--> p2
+  eps_1 --1--> p0
+  eps_1 --1--> p2
+  eps_1 --1--> p3
+
+5.5. REACHABILITY ANALYSIS & EXPLANATION OF TOKEN DYNAMICS
+----------------------------------------------------------
+Let M = (p0, p1, p2, p3) denote the token marking.
+
+1. INITIAL STATE:
+   M = (0, 1, 0, 0).
+   Only transition 'a' is enabled (consumes from p1).
+
+2. FIRING 'a':
+   'a' deposits 1 token in p0 and 2 tokens in p3.
+   Marking becomes: M = (1, 0, 0, 2).
+   At this point, two choices exist:
+
+   PATH A: SILENT CHOICE INTO BRANCH 1 (eps_1 fires)
+     - eps_1 consumes 1 from p0, 2 from p3.
+     - eps_1 produces 1 into p0, 1 into p2, 1 into p3.
+     - New marking: M = (1, 0, 1, 1).
+     - Now:
+       * 'b' requires 1 from p2 and 1 from p3. Both have 1!
+         'b' can fire repeatedly: consumes 1 from p2, 1 from p3; produces 1 into p2, 1 into p3.
+         Token count remains (1, 0, 1, 1). Thus, b* loops freely!
+       * 'c' requires 1 from p0 and 1 from p3. Both have 1!
+         When 'c' fires to terminate:
+         Consumes 1 from p0, 1 from p3.
+         Produces 1 into p2.
+         New marking: M = (0, 0, 2, 0).
+       * In marking (0, 0, 2, 0):
+         p3 has 0 tokens! 'b' cannot fire!
+         p0 has 0 tokens! 'c' cannot fire!
+         The net CLEANLY DEADLOCKS / TERMINATES.
+         Sequence accepted: a . eps_1 . b* . c = a b* c.
+
+   PATH B: VISIBLE CHOICE INTO BRANCH 2 ('c' fires directly)
+     - 'c' consumes 1 from p0, 1 from p3.
+     - 'c' produces 1 into p2.
+     - New marking: M = (0, 0, 1, 1).
+     - Now:
+       * 'b' requires 1 from p2 and 1 from p3. Both have 1!
+         'b' can fire repeatedly: b* loops freely!
+       * 'c' cannot fire because p0 has 0 tokens!
+       * eps_1 cannot fire because p0 has 0 tokens and p3 has 1 (needs 2)!
+       Sequence accepted: a . c . b* = a c b*.
+
+   ILLEGAL TRACE REJECTION:
+     - Trace "a b b c b b b":
+       Requires b after c in Path A.
+       After c, marking has p3 = 0. Transition b requires 1 token from p3.
+       Execution FAILS and is REJECTED.
+
+   EXPLANATION OF PLACE P2 (TOKEN COUNT = 2):
+     In the terminal state of Branch 1, place p2 contains 2 tokens:
+       - 1 token was deposited by eps_1 to enable the b loop.
+       - 1 token was deposited by c when terminating (since Delta_{r2}(c) = +1).
+     Because this is a general 2-bounded Petri net (k = 2), having 2 tokens in p2
+     in a terminal sink state is completely valid and sound according to Region Theory.
+
+================================================================================
+6. SUMMARY & CONTRIBUTIONS FOR MTP THESIS
+================================================================================
+This work provides three original contributions to Petri Net Synthesis Theory:
+
+1. THEORETICAL FORMULATION OF SILENT CHOICE DECOUPLING IN REGION SYNTHESIS:
+   We identified the exact condition under which visible region synthesis fails due
+   to constant gradient conflicts across branching structures, and proved that
+   introducing silent branch choices (internal non-determinism) resolves the conflict
+   while strictly preserving the visible language.
+
+2. THE IDENTITY BUFFER FILTERING CRITERION:
+   We formulated a structural criterion to distinguish between useless linear
+   buffers (t -> p -> eps) and genuine branch-decoupling silent transitions,
+   preventing over-complication and redundant transitions in synthesized nets.
+
+3. INTEGRATION INTO GENERAL k-BOUNDED SYNTHESIS:
+   The algorithm seamlessly coexists with Carmona et al.'s general multiset
+   formulation:
+   - Full excitation closure (k-ECTS) is preserved.
+   - Minimal regions and irredundant covers are guaranteed.
+   - Fully automated end-to-end pipeline from execution traces to verified Petri nets.
+
+================================================================================
+                             END OF EXPLANATION
+================================================================================

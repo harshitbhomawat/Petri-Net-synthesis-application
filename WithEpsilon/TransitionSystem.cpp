@@ -5,6 +5,7 @@
 #include <cctype>
 #include <memory>
 #include <tuple>
+#include <algorithm>
 
 // void TransitionSystem::loadFromFile(const string& filename) {
 //     std::ifstream infile(filename);
@@ -236,6 +237,10 @@ int compileNode(TransitionSystem& ts, Node* node, int current, int forcedTarget,
             if (ev.empty()) return (forcedTarget != -1) ? forcedTarget : current;
 
             if (forcedTarget == -1) {
+                // If current state already has a self-loop on ev, stay at current
+                if (addedEdges.count(std::make_tuple(current, ev, current))) {
+                    return current;
+                }
                 // Normal step: reuse shared prefix if it already exists.
                 auto& children = trieChildren[current];
                 auto it = children.find(ev);
@@ -346,6 +351,7 @@ string inferRegexFromTrace(const vector<string>& events, int x) {
                     if (j > 0) pattern += "->";
                     pattern += events[i + j];
                 }
+                parts.push_back(pattern);
                 parts.push_back("(" + pattern + ")*");
                 i += k * L;
                 foundRepetition = true;
@@ -418,23 +424,32 @@ void TransitionSystem::loadFromTraceFileWithRepetitions(const string& filename, 
     states.insert(root);
     initialState = root;
 
+    vector<string> lines;
     string line;
     while (getline(file, line)) {
         // skip empty lines and comments (lines starting with '#')
         while (!line.empty() && isspace((unsigned char)line.front())) line.erase(line.begin());
         while (!line.empty() && isspace((unsigned char)line.back())) line.pop_back();
         if (line.empty() || line[0] == '#') continue;
+        lines.push_back(line);
+    }
 
+    // Sort by length descending so loops from longer traces are learned and established first
+    std::stable_sort(lines.begin(), lines.end(), [](const string& a, const string& b) {
+        return a.size() > b.size();
+    });
+
+    for (const auto& rawLine : lines) {
         string traceExpr;
         // If line already contains regex characters, keep it as is
-        if (line.find_first_of("*+()") != string::npos) {
-            traceExpr = line;
+        if (rawLine.find_first_of("*+()") != string::npos) {
+            traceExpr = rawLine;
         } else {
-            vector<string> events = parseTraceEvents(line);
+            vector<string> events = parseTraceEvents(rawLine);
             if (events.empty()) continue;
             traceExpr = inferRegexFromTrace(events, repeatThreshold);
-            if (traceExpr != line) {
-                cout << "  Inferred loop from trace: " << line << "  -->  " << traceExpr << "\n";
+            if (traceExpr != rawLine) {
+                cout << "  Inferred loop from trace: " << rawLine << "  -->  " << traceExpr << "\n";
             }
         }
 

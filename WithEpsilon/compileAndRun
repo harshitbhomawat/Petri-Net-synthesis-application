@@ -1,0 +1,11 @@
+#!/bin/bash
+
+if [ -z "$1" ]; then
+  echo "Please provide the name of the C++ source file (without extension) as an argument."
+  exit 1
+fi
+
+g++ -c $1.cpp GenerateTraces.cpp TransitionSystem.cpp && 
+g++ $1.o GenerateTraces.o TransitionSystem.o -o run.exe &&
+rm -r *.o &&
+./run.exe
