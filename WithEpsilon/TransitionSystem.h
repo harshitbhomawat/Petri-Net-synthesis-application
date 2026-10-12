@@ -4,6 +4,8 @@
 #include <string>
 #include <map>
 #include <set>
+#include <iostream>
+#include <ostream>
 using namespace std;
 
 // struct TransitionSystem {
@@ -40,6 +42,23 @@ struct TransitionSystem {
         states.insert(post);
         event_transitions[e].push_back({pre, post});
     }
+    void writeDot(std::ostream& os) const {
+        os << "digraph TransitionSystem {\n";
+        os << "  rankdir=LR;\n";
+        os << "  node [shape=circle, fontsize=10];\n";
+        os << "  __start [shape=point, width=0.1];\n";
+        os << "  __start -> " << initialState << ";\n";
+        for (State s : states) {
+            os << "  " << s << " [label=\"" << s << "\"];\n";
+        }
+        for (const auto& [ev, transList] : event_transitions) {
+            for (const auto& t : transList) {
+                os << "  " << t.pre << " -> " << t.post << " [label=\"" << ev << "\"];\n";
+            }
+        }
+        os << "}\n";
+    }
+
     void loadFromFile(const string& filename);
     void loadFromTraceFile(const string& filename);
     void loadFromTraceFileWithRepetitions(const string& filename, int repeatThreshold = 3);

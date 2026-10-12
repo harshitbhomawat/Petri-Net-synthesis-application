@@ -868,14 +868,138 @@ inline bool isIdentityBuffer(const PetriNet& pn, const std::string& epsName) {
     return (inTransitionsToP == 1);
 }
 
+// ---------------------------------------------------------------------
+// Petri net simulation and silent trace checking
+// ---------------------------------------------------------------------
+
+inline bool isEnabled(const PetriNet& pn, const Event& e, const std::vector<int>& marking) {
+    for (const auto& [p, m] : pn.placeToTrans) {
+        auto it = m.find(e);
+        if (it != m.end() && marking[p] < it->second) return false;
+    }
+    return true;
+}
+
+inline std::vector<int> fire(const PetriNet& pn, const Event& e, const std::vector<int>& marking) {
+    std::vector<int> next = marking;
+    for (const auto& [p, m] : pn.placeToTrans) {
+        auto it = m.find(e);
+        if (it != m.end()) next[p] -= it->second;
+    }
+    auto tit = pn.transToPlace.find(e);
+    if (tit != pn.transToPlace.end())
+        for (const auto& [p, w] : tit->second) next[p] += w;
+    return next;
+}
+
+inline bool isSilent(const Event& e) {
+    return e.rfind("eps_", 0) == 0;
+}
+
+inline std::set<std::vector<int>> silentClosure(const PetriNet& pn,
+                                                 const std::set<std::vector<int>>& markings,
+                                                 int maxExpansion = 1000) {
+    std::set<std::vector<int>> closure = markings;
+    std::queue<std::vector<int>> q;
+    for (const auto& m : markings) q.push(m);
+
+    while (!q.empty() && (int)closure.size() < maxExpansion) {
+        auto m = q.front(); q.pop();
+        for (const auto& t : pn.transitions) {
+            if (isSilent(t) && isEnabled(pn, t, m)) {
+                auto nm = fire(pn, t, m);
+                if (!closure.count(nm)) {
+                    closure.insert(nm);
+                    q.push(nm);
+                }
+            }
+        }
+    }
+    return closure;
+}
+
+inline bool canFireTraceWithSilent(const PetriNet& pn, const std::vector<Event>& trace,
+                                   std::vector<int>* finalMarking = nullptr) {
+    std::set<std::vector<int>> currentMarkings = silentClosure(pn, {pn.initialMarking});
+    for (const auto& e : trace) {
+        if (isSilent(e)) continue;
+        std::set<std::vector<int>> nextMarkings;
+        for (const auto& m : currentMarkings) {
+            if (isEnabled(pn, e, m)) {
+                nextMarkings.insert(fire(pn, e, m));
+            }
+        }
+        if (nextMarkings.empty()) return false;
+        currentMarkings = silentClosure(pn, nextMarkings);
+    }
+    if (finalMarking && !currentMarkings.empty()) {
+        *finalMarking = *currentMarkings.begin();
+    }
+    return true;
+}
+
+inline bool canFireTrace(const PetriNet& pn, const std::vector<Event>& trace,
+                          std::vector<int>* finalMarking = nullptr) {
+    bool hasSilent = false;
+    for (const auto& t : pn.transitions) {
+        if (isSilent(t)) { hasSilent = true; break; }
+    }
+    if (hasSilent) {
+        return canFireTraceWithSilent(pn, trace, finalMarking);
+    }
+    std::vector<int> m = pn.initialMarking;
+    for (const auto& e : trace) {
+        if (!isEnabled(pn, e, m)) return false;
+        m = fire(pn, e, m);
+    }
+    if (finalMarking) *finalMarking = m;
+    return true;
+}
+
+inline std::vector<std::vector<Event>> extractCoveringTraces(const TransitionSystem& ts) {
+    std::vector<std::vector<Event>> traces;
+    std::map<State, std::vector<Event>> pathTo;
+    pathTo[ts.initialState] = {};
+    std::queue<State> q;
+    q.push(ts.initialState);
+
+    while (!q.empty()) {
+        State u = q.front(); q.pop();
+        for (const auto& [ev, tvec] : ts.event_transitions) {
+            for (const auto& t : tvec) {
+                if (t.pre == u && !pathTo.count(t.post)) {
+                    auto p = pathTo[u];
+                    p.push_back(ev);
+                    pathTo[t.post] = p;
+                    q.push(t.post);
+                }
+            }
+        }
+    }
+
+    for (const auto& [ev, tvec] : ts.event_transitions) {
+        for (const auto& t : tvec) {
+            if (pathTo.count(t.pre)) {
+                auto tr = pathTo[t.pre];
+                tr.push_back(ev);
+                traces.push_back(tr);
+            }
+        }
+    }
+    return traces;
+}
+
 // ---------------------------------------------------------------------------
 // Candidate Types for Epsilon Insertion:
-//   1. BRANCH_CHOICE: At a fork state u with out-degree >= 2, decouple an outgoing
-//      branch by turning u --e--> v into a silent decision u --eps--> v.
-//   2. SUBDIVISION: Subdivide a frontier transition u --e--> v into u --e--> s_mid --eps--> v.
+//   1. BRANCH_BYPASS_LOOP: At a fork state u with out-degree >= 2 entering a state
+//      that already loops on event e, allow silent branch entry u --eps--> v.
+//   2. BRANCH_PREPEND: At a fork state u with out-degree >= 2, prepend a silent
+//      choice u --eps--> s_branch --e--> v without deleting visible event e.
+//   3. SUBDIVISION: Subdivide a frontier transition u --e--> v into u --e--> s_mid --eps--> v.
 // ---------------------------------------------------------------------------
 enum class CandidateKind {
-    BRANCH_CHOICE,
+    BRANCH_BYPASS_LOOP,
+    BRANCH_PREPEND,
     SUBDIVISION
 };
 
@@ -948,11 +1072,16 @@ inline std::vector<EpsilonCandidate> collectEpsilonCandidates(
 
     std::vector<EpsilonCandidate> candidates;
 
-    // 1. Branch Choice Decoupling Candidates:
-    // Identify branching states (forks with out-degree >= 2)
+    // Out-degree of each state
     std::map<State, int> outDeg;
     for (const auto& [ev, tvec] : ts.event_transitions) {
         for (const auto& t : tvec) outDeg[t.pre]++;
+    }
+
+    // Check which states have outgoing transitions for which events
+    std::map<std::pair<State, Event>, bool> hasOutgoing;
+    for (const auto& [ev, tvec] : ts.event_transitions) {
+        for (const auto& t : tvec) hasOutgoing[{t.pre, ev}] = true;
     }
 
     for (const auto& [u, deg] : outDeg) {
@@ -960,20 +1089,33 @@ inline std::vector<EpsilonCandidate> collectEpsilonCandidates(
             for (const auto& [ev, tvec] : ts.event_transitions) {
                 if (ev.rfind("eps_", 0) == 0) continue; // skip existing silent transitions
                 for (const auto& t : tvec) {
-                    if (t.pre == u && t.pre != t.post) { // non-self-loop outgoing branch
-                        EpsilonCandidate cand;
-                        cand.kind = CandidateKind::BRANCH_CHOICE;
-                        cand.edge = {ev, t.pre, t.post};
-                        cand.description = "Silent branch choice at fork s" + std::to_string(u) + 
-                                           " (decouples " + ev + " branch entering s" + std::to_string(t.post) + ")";
-                        candidates.push_back(cand);
+                    if (t.pre == u && t.pre != t.post) {
+                        // 1. If post state ALREADY has an outgoing transition labeled ev:
+                        // we can consider silent entry directly to loop state
+                        if (hasOutgoing[{t.post, ev}]) {
+                            EpsilonCandidate cand;
+                            cand.kind = CandidateKind::BRANCH_BYPASS_LOOP;
+                            cand.edge = {ev, t.pre, t.post};
+                            cand.description = "Silent branch choice to loop entry at s" + std::to_string(u) + 
+                                               " (enters " + ev + "-loop state s" + std::to_string(t.post) + ")";
+                            candidates.push_back(cand);
+                        }
+
+                        // 2. Prepend branch choice:
+                        // u --eps--> sBranch --ev--> v (visible event ev is fully preserved!)
+                        EpsilonCandidate cand2;
+                        cand2.kind = CandidateKind::BRANCH_PREPEND;
+                        cand2.edge = {ev, t.pre, t.post};
+                        cand2.description = "Silent branch choice at fork s" + std::to_string(u) + 
+                                           " (prepends eps before " + ev + " entering s" + std::to_string(t.post) + ")";
+                        candidates.push_back(cand2);
                     }
                 }
             }
         }
     }
 
-    // 2. Structural Frontier Edge Subdivision Candidates:
+    // 3. Structural Frontier Edge Subdivision Candidates:
     auto frontierEdges = collectCandidateFrontierEdges(ts, defectEvent, violatingStates);
     for (const auto& fe : frontierEdges) {
         EpsilonCandidate cand;
@@ -993,7 +1135,7 @@ inline TransitionSystem applyCandidate(
         const std::string& epsName) {
 
     TransitionSystem trial = ts;
-    if (cand.kind == CandidateKind::BRANCH_CHOICE) {
+    if (cand.kind == CandidateKind::BRANCH_BYPASS_LOOP) {
         auto& tvec = trial.event_transitions[cand.edge.event];
         std::vector<Transition> newVec;
         bool removed = false;
@@ -1006,6 +1148,17 @@ inline TransitionSystem applyCandidate(
         }
         trial.event_transitions[cand.edge.event] = newVec;
         trial.event_transitions[epsName].push_back({cand.edge.pre, cand.edge.post});
+    } else if (cand.kind == CandidateKind::BRANCH_PREPEND) {
+        State sBranch = trial.numStates++;
+        auto& tvec = trial.event_transitions[cand.edge.event];
+        bool replaced = false;
+        for (auto& t : tvec) {
+            if (!replaced && t.pre == cand.edge.pre && t.post == cand.edge.post) {
+                t.pre = sBranch;
+                replaced = true;
+            }
+        }
+        trial.event_transitions[epsName].push_back({cand.edge.pre, sBranch});
     } else { // SUBDIVISION
         State sMid = trial.numStates++;
         auto& tvec = trial.event_transitions[cand.edge.event];
@@ -1050,6 +1203,7 @@ struct EpsilonSynthesisResult {
 //      - Gathers branch choice decouplers and structural boundary candidates.
 //      - Tests candidates 1-by-1:
 //        * Rejects any candidate that creates an unconstrained identity buffer.
+//        * Rejects any candidate where original TS traces cannot fire (trace preservation).
 //        * Accepts ONLY if bisimilarity is achieved or defect count strictly decreases.
 //      - Stops immediately once bisimilarity is reached.
 //      - Caps total epsilon count at a strict minimal bound (at most 2 epsilons).
@@ -1068,6 +1222,9 @@ inline EpsilonSynthesisResult findMinimalKWithEpsilonSynthesis(const TransitionS
     if (res.bisimilarAchieved) {
         return res; // Pure visible synthesis succeeded — no epsilons needed.
     }
+
+    // Extract covering traces from the original TS to ensure language preservation
+    auto coveringTraces = extractCoveringTraces(ts);
 
     // Collect the ORIGINAL event set (before any augmentation).
     std::set<Event> originalEvents;
@@ -1115,8 +1272,20 @@ inline EpsilonSynthesisResult findMinimalKWithEpsilonSynthesis(const TransitionS
                 // Derive Petri net to verify its structure
                 PetriNet trialPN = derivePetriNet(trialTS, trialResult.irredundantCover);
 
-                // STRICT FILTER: Reject any candidate that results in a useless identity buffer
+                // STRICT FILTER 1: Reject any candidate that results in a useless identity buffer
                 if (isIdentityBuffer(trialPN, ename)) {
+                    continue;
+                }
+
+                // STRICT FILTER 2: Trace preservation -- ALL original TS transitions must be firable
+                bool tracesPreserved = true;
+                for (const auto& tr : coveringTraces) {
+                    if (!canFireTraceWithSilent(trialPN, tr)) {
+                        tracesPreserved = false;
+                        break;
+                    }
+                }
+                if (!tracesPreserved) {
                     continue;
                 }
 
@@ -1155,44 +1324,7 @@ inline EpsilonSynthesisResult findMinimalKWithEpsilonSynthesis(const TransitionS
     return res;
 }
 
-// ---------------------------------------------------------------------
-// Petri net simulation -- used both for sanity-checking derivePetriNet()
-// and for anyone who wants to actually run the derived net.
-// ---------------------------------------------------------------------
 
-inline bool isEnabled(const PetriNet& pn, const Event& e, const std::vector<int>& marking) {
-    for (const auto& [p, m] : pn.placeToTrans) {
-        auto it = m.find(e);
-        if (it != m.end() && marking[p] < it->second) return false;
-    }
-    return true;
-}
-
-inline std::vector<int> fire(const PetriNet& pn, const Event& e, const std::vector<int>& marking) {
-    std::vector<int> next = marking;
-    for (const auto& [p, m] : pn.placeToTrans) {
-        auto it = m.find(e);
-        if (it != m.end()) next[p] -= it->second;
-    }
-    auto tit = pn.transToPlace.find(e);
-    if (tit != pn.transToPlace.end())
-        for (const auto& [p, w] : tit->second) next[p] += w;
-    return next;
-}
-
-// Replays a trace of events against the PN starting from its initial
-// marking. Returns false if some event in the trace is not enabled at
-// its point in the sequence (i.e. the PN does NOT accept this trace).
-inline bool canFireTrace(const PetriNet& pn, const std::vector<Event>& trace,
-                          std::vector<int>* finalMarking = nullptr) {
-    std::vector<int> m = pn.initialMarking;
-    for (const auto& e : trace) {
-        if (!isEnabled(pn, e, m)) return false;
-        m = fire(pn, e, m);
-    }
-    if (finalMarking) *finalMarking = m;
-    return true;
-}
 
 // BFS over the reachability graph. Useful to check bisimilarity: when
 // the region set used to derive pn is k-ECTS (Theorem 5.1), this count

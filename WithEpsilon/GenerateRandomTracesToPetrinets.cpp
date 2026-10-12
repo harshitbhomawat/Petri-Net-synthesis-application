@@ -133,15 +133,164 @@ static void writeRegionsSection(std::ofstream& out, const std::string& title,
 // ---------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------
-int main() {
+int main(int argc, char* argv[]) {
     try {
-        // ------------------------------------------------------------
-        // Step 1: Generate all traces (unchanged, done once)
-        // ------------------------------------------------------------
-        // std::cout << "=== Step 1: Generating all traces ===\n";
-        // int total = generateAllTraces(EVENTS_FILE, ALL_TRACES_FILE);
-        // std::cout << "Total traces generated: " << total << "\n\n";
+        std::string customTraceFile = "";
+        int cliKmax = -1;
+        int cliRepeatThreshold = -1;
+        int cliEpsilonAllowed = 1; // default to 1 (allowed)
+        std::string cliOutPnDot = "";
+        std::string cliOutTsDot = "";
+        std::string cliOutReport = "";
 
+        // Parse CLI flags if provided
+        for (int i = 1; i < argc; ++i) {
+            std::string arg = argv[i];
+            if (arg == "--trace-file" && i + 1 < argc) {
+                customTraceFile = argv[++i];
+            } else if (arg == "--kmax" && i + 1 < argc) {
+                cliKmax = std::stoi(argv[++i]);
+            } else if (arg == "--repeat-threshold" && i + 1 < argc) {
+                cliRepeatThreshold = std::stoi(argv[++i]);
+            } else if (arg == "--epsilon" && i + 1 < argc) {
+                cliEpsilonAllowed = std::stoi(argv[++i]);
+            } else if (arg == "--out-pn-dot" && i + 1 < argc) {
+                cliOutPnDot = argv[++i];
+            } else if (arg == "--out-ts-dot" && i + 1 < argc) {
+                cliOutTsDot = argv[++i];
+            } else if (arg == "--out-report" && i + 1 < argc) {
+                cliOutReport = argv[++i];
+            }
+        }
+
+        // Direct non-interactive execution mode
+        if (!customTraceFile.empty()) {
+            int kmax = (cliKmax > 0) ? cliKmax : DEFAULT_KMAX;
+            int repeatThreshold = (cliRepeatThreshold > 0) ? cliRepeatThreshold : DEFAULT_REPEAT_THRESHOLD;
+            std::string outPnDot = !cliOutPnDot.empty() ? cliOutPnDot : "output/petri_net.dot";
+            std::string outTsDot = !cliOutTsDot.empty() ? cliOutTsDot : "output/transition_system.dot";
+            std::string outReport = !cliOutReport.empty() ? cliOutReport : REPORT_FILE;
+
+            std::cout << "Running single synthesis on: " << customTraceFile << "\n";
+            std::cout << "kmax: " << kmax << ", repeatThreshold: " << repeatThreshold 
+                      << ", epsilonAllowed: " << cliEpsilonAllowed << "\n";
+
+            TransitionSystem ts;
+            ts.loadFromTraceFileWithRepetitions(customTraceFile, repeatThreshold);
+            std::cout << "States: " << ts.states.size()
+                      << ", Event types: " << ts.event_transitions.size() << "\n";
+
+            // Save TS DOT
+            {
+                std::ofstream tsDotOut(outTsDot);
+                if (tsDotOut) {
+                    ts.writeDot(tsDotOut);
+                    std::cout << "Transition system dot written to: " << outTsDot << "\n";
+                }
+            }
+
+            regions::TransitionSystem rts = toRegionsTS(ts);
+            regions::SynthesisSearchResult result;
+            regions::PetriNet pn;
+            bool epsilonAssisted = false;
+            std::map<std::string, std::string> epsilonTransitions;
+
+            if (cliEpsilonAllowed) {
+                regions::EpsilonSynthesisResult epsRes = regions::findMinimalKWithEpsilonSynthesis(rts, kmax);
+                result = epsRes.searchResult;
+                pn = regions::derivePetriNet(epsRes.augmentedTS, result.irredundantCover);
+                epsilonAssisted = epsRes.epsilonAssisted;
+                epsilonTransitions = epsRes.epsilonTransitions;
+            } else {
+                result = regions::findMinimalKForSynthesis(rts, kmax);
+                pn = regions::derivePetriNet(rts, result.irredundantCover);
+            }
+
+            std::cout << "k=" << result.k
+                      << (result.bisimilarPossible
+                              ? (epsilonAssisted ? " (bisimilar synthesis achieved WITH epsilon assistance)" : " (bisimilar synthesis possible)")
+                              : " (bisimilar NOT reached by kmax -- mining-only PN)")
+                      << ", cover size=" << result.irredundantCover.size() << "\n";
+
+            if (result.bisimilarPossible) {
+                if (epsilonAssisted) {
+                    std::cout << "SYNTHESIS_STATUS: SUCCESS_BISIMILAR_WITH_EPSILON\n";
+                    std::cout << "Successfully synthesized Petri net (via epsilon transitions)\n";
+                    std::cout << "  [Epsilon Aid] Inserted " << epsilonTransitions.size()
+                              << " silent transition(s) to resolve state-separation conflicts:\n";
+                    for (const auto& [ename, epurpose] : epsilonTransitions) {
+                        std::cout << "    * " << ename << ": " << epurpose << "\n";
+                    }
+                } else {
+                    std::cout << "SYNTHESIS_STATUS: SUCCESS_BISIMILAR\n";
+                    std::cout << "Successfully synthesized Petri net\n";
+                }
+            } else {
+                std::cout << "SYNTHESIS_STATUS: NOT_POSSIBLE_MINED\n";
+                std::cout << "Synthesis Not Possible, Petri net is mined\n";
+            }
+
+            // Save PN DOT
+            {
+                std::ofstream dotOut(outPnDot);
+                if (!dotOut) throw std::runtime_error("could not open " + outPnDot);
+                regions::writeDot(dotOut, pn);
+                std::cout << "Petri net dot written to: " << outPnDot << "\n";
+            }
+
+            // Write report
+            {
+                std::ofstream out(outReport);
+                if (out) {
+                    out << "# Region-based synthesis report\n\n"
+                        << "Run completed: " << timestamp() << "\n\n"
+                        << "- Trace file: `" << customTraceFile << "`\n"
+                        << "- kmax searched: " << kmax << "\n"
+                        << "- Repetition threshold (x): " << repeatThreshold << "\n"
+                        << "- Epsilon allowed: " << (cliEpsilonAllowed ? "YES" : "NO") << "\n\n";
+
+                    writeSelectedTraces(out, customTraceFile);
+                    writeTransitionSystem(out, ts);
+
+                    out << "### Region synthesis result\n\n";
+                    out << "- Smallest k reached: **" << result.k << "**\n";
+                    out << "- Excitation closed (bisimilar): **"
+                        << (result.bisimilarPossible
+                                ? (epsilonAssisted ? "YES (via epsilon transitions)" : "YES")
+                                : "NO (mining-only overapproximation)") << "**\n";
+                    out << "- Synthesis status: **"
+                        << (result.bisimilarPossible
+                                ? (epsilonAssisted ? "Successfully synthesized Petri net (via epsilon transitions)" : "Successfully synthesized Petri net")
+                                : "Synthesis Not Possible, Petri net is mined") << "**\n\n";
+                    if (epsilonAssisted) {
+                        out << "- Epsilon assistance: **YES (" << epsilonTransitions.size()
+                            << " silent transition(s) added)**\n\n";
+                        for (const auto& [ename, epurpose] : epsilonTransitions) {
+                            out << "  * `" << ename << "`: " << epurpose << "\n";
+                        }
+                        out << "\n";
+                    } else {
+                        out << "- Epsilon assistance used: **NO**\n\n";
+                    }
+
+                    writeRegionsSection(out, "All minimal k-bounded regions", result.minimalRegions);
+                    writeRegionsSection(out, "Irredundant cover (used to derive the Petri net below)",
+                                         result.irredundantCover);
+
+                    out << "### Derived Petri net\n\n```\n";
+                    std::ostringstream pnStream;
+                    regions::printPetriNet(pnStream, pn);
+                    out << pnStream.str();
+                    out << "```\n";
+                    std::cout << "Report written to: " << outReport << "\n";
+                }
+            }
+            return 0;
+        }
+
+        // ------------------------------------------------------------
+        // Interactive Fallback Mode (legacy behavior)
+        // ------------------------------------------------------------
         int kmax = readIntOrDefault("Max region-weight bound to search (kmax)", DEFAULT_KMAX);
         int repeatThreshold = readIntOrDefault("Repetition threshold to treat as loop (x)", DEFAULT_REPEAT_THRESHOLD);
 
@@ -165,7 +314,6 @@ int main() {
             int n = readIntOrDefault("How many random traces to select (n)?", DEFAULT_N_TRACES);
 
             std::string selectedFile = "output/SelectedTraces_iter" + std::to_string(iteration) + ".txt";
-            //pickRandomTraces(ALL_TRACES_FILE, n, selectedFile);
 
             // ---- build TS with loop inference from repetitions ----
             TransitionSystem ts;
@@ -173,6 +321,13 @@ int main() {
 
             std::cout << "States: " << ts.states.size()
                       << ", Event types: " << ts.event_transitions.size() << "\n";
+
+            // Save TS DOT as well
+            std::string tsDotFile = "output/iteration_" + std::to_string(iteration) + "_ts.dot";
+            std::ofstream tsDotOut(tsDotFile);
+            if (tsDotOut) {
+                ts.writeDot(tsDotOut);
+            }
 
             // ---- region synthesis with epsilon-transition assistance ----
             regions::TransitionSystem rts = toRegionsTS(ts);
@@ -189,6 +344,18 @@ int main() {
                                     ? " (bisimilar synthesis possible WITHOUT epsilon)"
                                     : " (bisimilar NOT reached by kmax -- mining-only PN)"))
                       << ", cover size=" << result.irredundantCover.size() << "\n";
+            if (result.bisimilarPossible) {
+                if (epsRes.epsilonAssisted) {
+                    std::cout << "  SYNTHESIS_STATUS: SUCCESS_BISIMILAR_WITH_EPSILON\n";
+                    std::cout << "  Successfully synthesized Petri net (via epsilon transitions)\n";
+                } else {
+                    std::cout << "  SYNTHESIS_STATUS: SUCCESS_BISIMILAR\n";
+                    std::cout << "  Successfully synthesized Petri net\n";
+                }
+            } else {
+                std::cout << "  SYNTHESIS_STATUS: NOT_POSSIBLE_MINED\n";
+                std::cout << "  Synthesis Not Possible, Petri net is mined\n";
+            }
             if (epsRes.epsilonAssisted) {
                 std::cout << "  [Epsilon Aid] Inserted " << epsRes.epsilonTransitions.size()
                           << " silent transition(s) to resolve state-separation conflicts:\n";
@@ -224,6 +391,10 @@ int main() {
                 << (result.bisimilarPossible
                         ? (epsRes.epsilonAssisted ? "YES (via epsilon transitions)" : "YES")
                         : "NO (mining-only overapproximation)") << "**\n";
+            out << "- Synthesis status: **"
+                << (result.bisimilarPossible
+                        ? (epsRes.epsilonAssisted ? "Successfully synthesized Petri net (via epsilon transitions)" : "Successfully synthesized Petri net")
+                        : "Synthesis Not Possible, Petri net is mined") << "**\n\n";
             if (epsRes.epsilonAssisted) {
                 out << "- Epsilon assistance: **YES (" << epsRes.epsilonTransitions.size()
                     << " silent transition(s) added)**\n\n";

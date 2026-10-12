@@ -238,17 +238,24 @@ PHASE 2: DEFECT DIAGNOSIS
     Record the violating states S_violating = { s in S | e disabled at s but enabled by regions }.
 
 PHASE 3: STRUCTURAL CANDIDATE GENERATION
-  - Instead of blind subdivision, gather structural candidates:
-    (A) Silent Branch Choice Candidates (BRANCH_CHOICE):
+  - Instead of blind modification, gather principled structural candidates:
+    (A) Silent Branch Prepend Candidates (BRANCH_PREPEND):
         Scan all fork states u (states with out-degree >= 2).
         For each outgoing visible edge u --e'--> v:
-        Create a candidate to replace u --e'--> v with a silent choice:
+        Create a candidate to prepend a silent decision before e':
+            u --eps--> s_branch --e'--> v
+        This decouples the branch decision from the visible event e' while strictly
+        preserving e' and all downstream traces.
+    (B) Silent Branch Bypass into Loop Entry (BRANCH_BYPASS_LOOP):
+        If target state v ALREADY has an outgoing transition on event e' (such as a self-loop
+        v --e'--> v), we can directly allow silent entry into the loop state:
             u --eps--> v
-        (allowing internal non-determinism to configure the net before visible actions).
-    (B) Structural Frontier Subdivision (SUBDIVISION):
-        Compute the boundary edges entering ER(e) or the defect components.
+        Since v enables e', visible actions of the branch remain fully enabled.
+    (C) Structural Frontier Subdivision (SUBDIVISION):
+        Compute boundary edges entering ER(e) or the defect components and subdivide:
+            u --e--> s_mid --eps--> v
 
-PHASE 4: IDENTITY BUFFER FILTER
+PHASE 4: SOUNDNESS & TRACE PRESERVATION FILTERS
   - For each trial candidate:
     1. Augment the TS with the candidate epsilon.
     2. Run region synthesis on the trial TS.
@@ -256,12 +263,17 @@ PHASE 4: IDENTITY BUFFER FILTER
     4. Apply the Identity Buffer Detector:
        Check if eps has exactly 1 input place p_in with no other outputs (p_in^\bullet = {eps}),
        and p_in has exactly 1 input transition (\bullet p_in = {t_in}).
-    5. IF IT IS AN IDENTITY BUFFER: REJECT THE CANDIDATE IMMEDIATELY!
+       IF IT IS AN IDENTITY BUFFER: REJECT THE CANDIDATE IMMEDIATELY!
+    5. Apply the Trace Preservation Filter:
+       Simulate the trial Petri net with silent transitions against all covering traces
+       from the original Transition System (canFireTraceWithSilent).
+       IF ANY ORIGINAL TRACE FAILS TO FIRE: REJECT THE CANDIDATE IMMEDIATELY!
 
 PHASE 5: STRICT GREEDY ACCEPTANCE
   - Accept a candidate ONLY if:
-    (a) It is NOT an identity buffer, AND
-    (b) It either achieves 100% bisimilarity (k-ECTS) OR strictly decreases the
+    (a) It passes the Identity Buffer Filter (isIdentityBuffer == false), AND
+    (b) It passes the Trace Preservation Filter (all original traces fire), AND
+    (c) It either achieves 100% bisimilarity (k-ECTS) OR strictly decreases the
         original defect count.
   - As soon as bisimilarity is achieved, HALT and return the minimal net.
 
@@ -271,13 +283,14 @@ Let u be a decision state (fork) where branches diverge:
   - Branch 1: u --b--> v_1 (where b loops and c terminates)
   - Branch 2: u --c--> v_2 (where c initiates and b loops)
 
-By generating a Branch Choice candidate on u --b--> v_1:
-  We replace u --b--> v_1 with u --eps_1--> v_1.
-At state u, the choice is now between:
-  - Firing eps_1 (silent choice into Branch 1)
-  - Firing c (visible choice into Branch 2)
-In Branch 1, since the loop v_1 --b--> v_1 is already present at v_1, event b
-is still available and can fire any number of times (b*).
+Two decoupled forms are supported:
+1. When v_1 has an outgoing transition for b (e.g. self-loop v_1 --b--> v_1),
+   silent bypass into loop entry replaces u --b--> v_1 with u --eps_1--> v_1.
+   Here, firing eps_1 silently enters Branch 1 without consuming visible events,
+   and b is still enabled at v_1 via its loop.
+2. In general branching without pre-existing self-loops, silent prepend replaces
+   u --b--> v_1 with u --eps_1--> s_branch --b--> v_1. Visible event b is NEVER
+   deleted and trace preservation is rigorously maintained.
 Thus, the visible language is COMPLETELY PRESERVED, while the branching conflict
 is cleanly decoupled!
 
