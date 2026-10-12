@@ -10,8 +10,7 @@ from pathlib import Path
 
 # Paths
 BASE_DIR = Path(__file__).resolve().parent.parent
-WITH_EPS_DIR = BASE_DIR / "WithEpsilon"
-WITHOUT_EPS_DIR = BASE_DIR / "WithoutEpsilon"
+ENGINE_DIR = BASE_DIR / "WithEpsilon"
 OUTPUT_DIR = BASE_DIR / "output"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -85,47 +84,6 @@ def extract_traces_from_pns(pns_bytes: bytes) -> tuple[str, dict]:
     return traces, metadata
 
 # ---------------------------------------------------------------------
-# Sidebar Configuration
-# ---------------------------------------------------------------------
-st.sidebar.header("⚙️ Configuration")
-
-engine_choice = st.sidebar.radio(
-    "Synthesis Engine:",
-    options=["WithEpsilon (Testing / Enhanced)", "WithoutEpsilon (Baseline)"],
-    index=0,
-    help="Select which synthesis engine binary to execute."
-)
-is_with_epsilon_engine = "WithEpsilon" in engine_choice
-
-kmax = st.sidebar.slider(
-    "Max-k Region Weight Bound (kmax):",
-    min_value=1,
-    max_value=10,
-    value=3,
-    step=1,
-    help="The maximum region weight / bound to search for minimal excitation-closed regions."
-)
-
-repeat_threshold = st.sidebar.number_input(
-    "Loop Inference Repetition Threshold (x):",
-    min_value=2,
-    max_value=20,
-    value=3,
-    step=1,
-    help="Consecutive occurrences of an event or pattern (e.g., b->b->b) to infer as a loop (e.g., b*)."
-)
-
-if is_with_epsilon_engine:
-    allow_epsilon = st.sidebar.checkbox(
-        "Allow Epsilon Transitions (ε-assisted)",
-        value=True,
-        help="Permit silent epsilon transitions to resolve state-separation conflicts and achieve bisimulation."
-    )
-else:
-    allow_epsilon = False
-    st.sidebar.info("ℹ️ Epsilon transitions disabled in WithoutEpsilon mode.")
-
-# ---------------------------------------------------------------------
 # Sample Traces & State Setup
 # ---------------------------------------------------------------------
 SAMPLE_TRACES = """a->b->b->b->d
@@ -151,6 +109,45 @@ def on_pns_file_uploaded():
             st.session_state["pns_notification"] = f"Loaded {len(traces.strip().splitlines())} trace(s) from `{uploaded.name}`!{engine_info}"
         else:
             st.session_state["pns_error_notification"] = f"No valid traces.txt found inside `{uploaded.name}`."
+
+# ---------------------------------------------------------------------
+# Sidebar: Load Project & Configuration
+# ---------------------------------------------------------------------
+st.sidebar.header("📂 Load Project (.pns)")
+st.sidebar.file_uploader(
+    "Upload .pns file",
+    type=["pns"],
+    help="Load traces from a saved .pns project file into the editor.",
+    key="pns_file_uploader",
+    on_change=on_pns_file_uploaded
+)
+
+st.sidebar.markdown("---")
+st.sidebar.header("⚙️ Configuration")
+
+kmax = st.sidebar.slider(
+    "Max-k Region Weight Bound (kmax):",
+    min_value=1,
+    max_value=10,
+    value=3,
+    step=1,
+    help="The maximum region weight / bound to search for minimal excitation-closed regions."
+)
+
+repeat_threshold = st.sidebar.number_input(
+    "Loop Inference Repetition Threshold (x):",
+    min_value=2,
+    max_value=20,
+    value=3,
+    step=1,
+    help="Consecutive occurrences of an event or pattern (e.g., b->b->b) to infer as a loop (e.g., b*)."
+)
+
+allow_epsilon = st.sidebar.checkbox(
+    "Allow Epsilon Transitions (ε-assisted)",
+    value=True,
+    help="Permit silent epsilon transitions to resolve state-separation conflicts and achieve bisimulation."
+)
 
 st.subheader("1. Input Execution Traces")
 st.write(
@@ -182,17 +179,6 @@ with col_presets:
         args=("a->b->b->b->c\na->b->b->b->b->b->c",)
     )
 
-    st.markdown("---")
-    st.markdown("**📂 Load from .pns File:**")
-    st.file_uploader(
-        "Upload .pns file",
-        type=["pns"],
-        help="Load traces from a saved .pns project file into the editor.",
-        key="pns_file_uploader",
-        on_change=on_pns_file_uploaded,
-        label_visibility="collapsed"
-    )
-
 with col_input:
     if "pns_notification" in st.session_state:
         st.success(st.session_state.pop("pns_notification"), icon="📂")
@@ -215,7 +201,7 @@ if run_synthesis:
     if not clean_traces:
         st.error("Please provide at least one valid trace!")
     else:
-        engine_dir = WITH_EPS_DIR if is_with_epsilon_engine else WITHOUT_EPS_DIR
+        engine_dir = ENGINE_DIR
         exe_path = engine_dir / "run.exe"
 
         if not exe_path.exists():
@@ -242,11 +228,9 @@ if run_synthesis:
                         "--repeat-threshold", str(repeat_threshold),
                         "--out-pn-dot", str(pn_dot_file),
                         "--out-ts-dot", str(ts_dot_file),
-                        "--out-report", str(report_file)
+                        "--out-report", str(report_file),
+                        "--epsilon", "1" if allow_epsilon else "0"
                     ]
-
-                    if is_with_epsilon_engine:
-                        cmd.extend(["--epsilon", "1" if allow_epsilon else "0"])
 
                     try:
                         proc = subprocess.run(
@@ -286,10 +270,10 @@ if run_synthesis:
 
                             # Package metadata and .pns bundle
                             meta = {
-                                "engine": "WithEpsilon" if is_with_epsilon_engine else "WithoutEpsilon",
+                                "engine": "WithEpsilon",
                                 "kmax": kmax,
                                 "repeat_threshold": repeat_threshold,
-                                "allow_epsilon": allow_epsilon if is_with_epsilon_engine else False,
+                                "allow_epsilon": allow_epsilon,
                                 "is_mined": is_mined,
                                 "is_eps_assisted": is_eps_assisted,
                                 "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
